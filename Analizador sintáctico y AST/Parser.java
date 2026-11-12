@@ -1,97 +1,233 @@
-import java.util.List;
+package compilador;
+
 import java.util.ArrayList;
+import java.util.List;
 
-// ==========================================
-// ESTRUCTURA DEL TOKEN (Recibido del analisis lexico)
-// ==========================================
-class Token {
-    private String type;   // Tipo de token (Ej: "IDENTIFICADOR", "NUMERO", "SUMA")
-    private String lexeme; // Texto literal que se leyo en el codigo fuente (Ej: "x", "5", "+")
-
-    public Token(String type, String lexeme) {
-        this.type = type;
-        this.lexeme = lexeme;
-    }
-
-    public String getType() { return type; }
-    public String getLexeme() { return lexeme; }
-}
-
-// ==========================================
-// MOTOR DEL ANALIZADOR SINTACTICO (Parser de Descenso Recursivo)
-// Procesa el flujo de tokens provisto por el lexico y construye el AST.
-// ==========================================
 public class Parser {
-    private List<Token> tokens; // Lista de tokens que viene del analizador lexico
-    private int current = 0;    // Apuntador que rastrea el token actual que se esta analizando
+    private final List<Token> tokens;
+    private int current = 0;
 
-    // Constructor para inicializar el parser con la lista de tokens
     public Parser(List<Token> tokens) {
         this.tokens = tokens;
     }
 
-    // Punto de entrada principal del parser: procesa instrucciones hasta el final
-    public List<ASTNode> parse() {
+    // program → PROGRAM identifier ; block .
+    public ProgramNode parse() {
+        Token progTok = consume(TokenType.PROGRAM, "Se esperaba 'PROGRAM' al inicio.");
+        Token idTok = consume(TokenType.ID, "Se esperaba el nombre del programa.");
+        consume(TokenType.SEMICOLON, "Se esperaba ';' después del nombre del programa.");
+
+        List<VarDeclNode> declarations = declarationPart();
+        BlockNode mainBlock = statementPart();
+
+        consume(TokenType.DOT, "Se esperaba '.' al final del programa.");
+        consume(TokenType.EOF, "Se encontraron tokens inesperados después de 'END.'.");
+
+        return new ProgramNode(idTok.lexeme, declarations, mainBlock, progTok.line, progTok.column);
+    }
+
+    // declaration_part → VAR declaration_list | ε
+    private List<VarDeclNode> declarationPart() {
+        List<VarDeclNode> declarations = new ArrayList<>();
+        if (match(TokenType.VAR)) {
+            declarations.add(parseDeclaration());
+            while (match(TokenType.SEMICOLON)) {
+                if (check(TokenType.ID)) {
+                    declarations.add(parseDeclaration());
+                } else {
+                    break;
+                }
+            }
+        }
+        return declarations;
+    }
+
+    // declaration → identifier_list : type
+    private VarDeclNode parseDeclaration() {
+        Token firstId = consume(TokenType.ID, "Se esperaba un identificador en la declaración.");
+        List<String> ids = new ArrayList<>();
+        ids.add(firstId.lexeme);
+
+        while (match(TokenType.COMMA)) {
+            Token nextId = consume(TokenType.ID, "Se esperaba un identificador después de ','.");
+            ids.add(nextId.lexeme);
+        }
+
+        consume(TokenType.COLON, "Se esperaba ':' antes del tipo de dato.");
+
+        String type;
+        if (match(TokenType.INTEGER, TokenType.REAL, TokenType.BOOLEAN)) {
+            type = previous().type.name();
+        } else {
+            throw error(peek(), "Se esperaba un tipo de dato válido (INTEGER, REAL o BOOLEAN).");
+        }
+
+        return new VarDeclNode(ids, type, firstId.line, firstId.column);
+    }
+
+    // statement_part → BEGIN statement_list END
+    private BlockNode statementPart() {
+        Token beginTok = consume(TokenType.BEGIN, "Se esperaba 'BEGIN'.");
+        List<ASTNode> statements = parseStatementList();
+        consume(TokenType.END, "Se esperaba 'END'.");
+        return new BlockNode(statements, beginTok.line, beginTok.column);
+    }
+
+    // statement_list → statement ; statement_list | statement
+    private List<ASTNode> parseStatementList() {
         List<ASTNode> statements = new ArrayList<>();
-        while (!isAtEnd()) {
-            statements.add(parseAssignStatement());
+        ASTNode first = parseStatement();
+        if (first != null) statements.add(first);
+
+        while (match(TokenType.SEMICOLON)) {
+            ASTNode next = parseStatement();
+            if (next != null) statements.add(next);
         }
         return statements;
     }
 
-    // Regla gramatical para asignaciones: variable = expresion;
-    // NOTA DE INTEGRACION: Aqui se pueden conectar las validaciones de la tabla de simbolos.
-    private ASTNode parseAssignStatement() {
-        Token idToken = consume("IDENTIFICADOR", "Se espera el nombre de una variable.");
-        consume("ASIGNACION", "Se espera el operador '='.");
-        ASTNode expr = parseExpression();
-        consume("PUNTO_Y_COMA", "Se espera ';' al final de la instruccion.");
-        
-        return new AssignNode(idToken.getLexeme(), expr);
+    // statement → assignment | if_statement | while_statement | read_statement | write_statement | compound_statement | ε
+    private ASTNode parseStatement() {
+        if (check(TokenType.ID)) {
+            return parseAssignment();
+        }
+        if (match(TokenType.IF)) {
+            return parseIfStatement();
+        }
+        if (match(TokenType.WHILE)) {
+            return parseWhileStatement();
+        }
+        if (match(TokenType.READ)) {
+            return parseReadStatement();
+        }
+        if (match(TokenType.WRITE)) {
+            return parseWriteStatement();
+        }
+        if (check(TokenType.BEGIN)) {
+            return statementPart();
+        }
+        return null; // Producción ε
     }
 
-    // Regla gramatical para expresiones aditivas (+ y -) respetando precedencia
-    private ASTNode parseExpression() {
-        ASTNode node = parseTerm();
+    // assignment → identifier := expression
+    private ASTNode parseAssignment() {
+        Token idTok = consume(TokenType.ID, "Se esperaba un identificador.");
+        consume(TokenType.ASSIGN, "Se esperaba ':=' en la asignación.");
+        ASTNode expr = parseExpression();
+        return new AssignNode(idTok.lexeme, expr, idTok.line, idTok.column);
+    }
 
-        while (match("SUMA", "RESTA")) {
-            String operator = previous().getLexeme(); 
-            ASTNode right = parseTerm();              
-            node = new BinaryOpNode(node, operator, right); 
+    // if_statement → IF expression THEN statement opt_else
+    private ASTNode parseIfStatement() {
+        Token ifTok = previous();
+        ASTNode condition = parseExpression();
+        consume(TokenType.THEN, "Se esperaba 'THEN' después de la condición del IF.");
+        ASTNode thenBranch = parseStatement();
+        ASTNode elseBranch = null;
+        if (match(TokenType.ELSE)) {
+            elseBranch = parseStatement();
+        }
+        return new IfNode(condition, thenBranch, elseBranch, ifTok.line, ifTok.column);
+    }
+
+    // while_statement → WHILE expression DO statement
+    private ASTNode parseWhileStatement() {
+        Token whileTok = previous();
+        ASTNode condition = parseExpression();
+        consume(TokenType.DO, "Se esperaba 'DO' después de la condición del WHILE.");
+        ASTNode body = parseStatement();
+        return new WhileNode(condition, body, whileTok.line, whileTok.column);
+    }
+
+    // read_statement → READ ( identifier_list )
+    private ASTNode parseReadStatement() {
+        Token readTok = previous();
+        consume(TokenType.LPAREN, "Se esperaba '(' después de READ.");
+        List<String> ids = new ArrayList<>();
+        ids.add(consume(TokenType.ID, "Se esperaba un identificador en READ.").lexeme);
+        while (match(TokenType.COMMA)) {
+            ids.add(consume(TokenType.ID, "Se esperaba un identificador después de ','.").lexeme);
+        }
+        consume(TokenType.RPAREN, "Se esperaba ')' al cerrar READ.");
+        return new ReadNode(ids, readTok.line, readTok.column);
+    }
+
+    // write_statement → WRITE ( expression_list )
+    private ASTNode parseWriteStatement() {
+        Token writeTok = previous();
+        consume(TokenType.LPAREN, "Se esperaba '(' después de WRITE.");
+        List<ASTNode> exprs = new ArrayList<>();
+        exprs.add(parseExpression());
+        while (match(TokenType.COMMA)) {
+            exprs.add(parseExpression());
+        }
+        consume(TokenType.RPAREN, "Se esperaba ')' al cerrar WRITE.");
+        return new WriteNode(exprs, writeTok.line, writeTok.column);
+    }
+
+    // expression → simple_expression relop simple_expression | simple_expression
+    private ASTNode parseExpression() {
+        ASTNode left = parseSimpleExpression();
+        if (match(TokenType.EQ, TokenType.NEQ, TokenType.LT, TokenType.LTE, TokenType.GT, TokenType.GTE)) {
+            Token op = previous();
+            ASTNode right = parseSimpleExpression();
+            return new BinaryOpNode(left, op.type, right, op.line, op.column);
+        }
+        return left;
+    }
+
+    // simple_expression → simple_expression addop term | term
+    private ASTNode parseSimpleExpression() {
+        ASTNode node = parseTerm();
+        while (match(TokenType.PLUS, TokenType.MINUS, TokenType.OR)) {
+            Token op = previous();
+            ASTNode right = parseTerm();
+            node = new BinaryOpNode(node, op.type, right, op.line, op.column);
         }
         return node;
     }
 
-    // Regla gramatical para expresiones multiplicativas (* y /) con mayor precedencia
+    // term → term mulop factor | factor
     private ASTNode parseTerm() {
         ASTNode node = parseFactor();
-
-        while (match("MULT", "DIV")) {
-            String operator = previous().getLexeme();
+        while (match(TokenType.STAR, TokenType.SLASH, TokenType.AND)) {
+            Token op = previous();
             ASTNode right = parseFactor();
-            node = new BinaryOpNode(node, operator, right);
+            node = new BinaryOpNode(node, op.type, right, op.line, op.column);
         }
         return node;
     }
 
-    // Regla gramatical para elementos base: numeros, identificadores o parentesis
+    // factor → identifier | number | ( expression ) | NOT factor
     private ASTNode parseFactor() {
-        // Si encontramos un numero o identificador, creamos un nodo hoja
-        if (match("NUMERO", "IDENTIFICADOR")) {
-            return new LiteralNode(previous().getLexeme());
+        if (match(TokenType.ID)) {
+            Token tok = previous();
+            return new VarNode(tok.lexeme, tok.line, tok.column);
         }
-        // Manejo de parentesis para agrupacion explicita: ( expresion )
-        if (match("PARENTESIS_IZQ")) {
-            ASTNode expr = parseExpression(); 
-            consume("PARENTESIS_DER", "Se espera ')' despues de la expresion."); 
+        if (match(TokenType.NUM_INT)) {
+            Token tok = previous();
+            return new LiteralNode(tok.lexeme, "INTEGER", tok.line, tok.column);
+        }
+        if (match(TokenType.NUM_REAL)) {
+            Token tok = previous();
+            return new LiteralNode(tok.lexeme, "REAL", tok.line, tok.column);
+        }
+        if (match(TokenType.LPAREN)) {
+            ASTNode expr = parseExpression();
+            consume(TokenType.RPAREN, "Se esperaba ')' después de la expresión.");
             return expr;
         }
-        throw new RuntimeException("Error sintactico en el token: " + peek().getLexeme());
+        if (match(TokenType.NOT)) {
+            Token op = previous();
+            ASTNode operand = parseFactor();
+            return new UnaryOpNode(op.type, operand, op.line, op.column);
+        }
+        throw error(peek(), "Factor inesperado en la expresión: '" + peek().lexeme + "'");
     }
 
-    // Verifica si el token actual coincide con algun tipo y avanza si es asi
-    private boolean match(String... types) {
-        for (String type : types) {
+    // Métodos auxiliares
+    private boolean match(TokenType... types) {
+        for (TokenType type : types) {
             if (check(type)) {
                 advance();
                 return true;
@@ -100,64 +236,34 @@ public class Parser {
         return false;
     }
 
-    // Consume el tipo de token esperado o lanza un error si no coincide
-    private Token consume(String type, String errorMessage) {
+    private Token consume(TokenType type, String message) {
         if (check(type)) return advance();
-        throw new RuntimeException("Error sintactico: " + errorMessage);
+        throw error(peek(), message + " (Se encontró: '" + peek().lexeme + "')");
     }
 
-    // Revisa si el token actual coincide con el tipo especificado sin consumirlo
-    private boolean check(String type) {
-        if (isAtEnd()) return false;
-        return peek().getType().equals(type);
+    private boolean check(TokenType type) {
+        if (isAtEnd()) return type == TokenType.EOF;
+        return peek().type == type;
     }
 
-    // Consume el token actual y mueve el apuntador hacia adelante
     private Token advance() {
         if (!isAtEnd()) current++;
         return previous();
     }
 
-    // Verifica si ya llegamos al final de los tokens (EOF)
     private boolean isAtEnd() {
-        return peek().getType().equals("EOF");
+        return peek().type == TokenType.EOF;
     }
 
-    // Regresa el token actual que estamos viendo sin mover el apuntador
     private Token peek() {
         return tokens.get(current);
     }
 
-    // Regresa el token que acabamos de procesar (el anterior)
     private Token previous() {
         return tokens.get(current - 1);
     }
 
-    // ==========================================
-    // METODO MAIN PARA PRUEBAS E IMPRESION DEL ARBOL
-    // Simula la entrada de tokens e imprime la estructura jerarquica del AST
-    // ==========================================
-    public static void main(String[] args) {
-        // Simulamos los tokens que pasara el componente de analisis lexico
-        List<Token> tokensPrueba = new ArrayList<>();
-        tokensPrueba.add(new Token("IDENTIFICADOR", "x"));
-        tokensPrueba.add(new Token("ASIGNACION", "="));
-        tokensPrueba.add(new Token("NUMERO", "10"));
-        tokensPrueba.add(new Token("SUMA", "+"));
-        tokensPrueba.add(new Token("NUMERO", "5"));
-        tokensPrueba.add(new Token("PUNTO_Y_COMA", ";"));
-        tokensPrueba.add(new Token("EOF", ""));
-
-        try {
-            Parser miParser = new Parser(tokensPrueba);
-            List<ASTNode> arbol = miParser.parse();
-            
-            System.out.println("=== EXITO! ARBOL SINTACTICO GENERADO ===\n");
-            for (ASTNode nodo : arbol) {
-                System.out.println(nodo.toStringTree(""));
-            }
-        } catch (Exception e) {
-            System.out.println("Error: " + e.getMessage());
-        }
+    private RuntimeException error(Token token, String message) {
+        return new RuntimeException(String.format("[Error Sintáctico] Línea %2d, Col %2d: %s", token.line, token.column, message));
     }
 }
