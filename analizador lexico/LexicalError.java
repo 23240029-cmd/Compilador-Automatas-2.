@@ -1,9 +1,9 @@
 package compilador;
 
 public class LexicalError {
-    public final String message;
-    public final int line;
-    public final int column;
+    public final String message;// mensaje de "fallo tal lao""
+    public final int line;// linea donde sucuiedo
+    public final int column;//columna donde ourrio el error 
 
     public LexicalError(String message, int line, int column) {
         this.message = message;
